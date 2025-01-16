@@ -68,7 +68,7 @@ func main() {
 	setUserOnQuarter(q, users)
 
 	slog.Info("set commenters...")
-	if err := user.SetCommenters(ctx, cli, q); err != nil {
+	if err := user.SetCommenters(ctx, cli, q, len(users)); err != nil {
 		panic(err)
 	}
 
