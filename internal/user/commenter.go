@@ -11,16 +11,18 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 )
 
-func SetCommenters(ctx context.Context, cli *client.Client, q *model.Quarter, expectedCount int) error {
+func SetCommenters(ctx context.Context, cli *client.Client, q *model.Quarter) error {
 	for _, w := range q.Weeks {
 		slog.Info("get commenters", slog.Int("week", w.Index))
 		for _, r := range w.OnTimeRecords {
-			commenters, err := GetCommenters(ctx, cli, r.ID, expectedCount)
+			commenters, err := GetCommenters(ctx, cli, r.ID, w.CommentEnd)
 			if err != nil {
 				return err
 			}
+
 			r.Commenters = commenters
 		}
 	}
@@ -28,7 +30,7 @@ func SetCommenters(ctx context.Context, cli *client.Client, q *model.Quarter, ex
 	return nil
 }
 
-func GetCommenters(ctx context.Context, cli *client.Client, pageID string, expectedCount int) ([]*model.User, error) {
+func GetCommenters(ctx context.Context, cli *client.Client, pageID string, commentEnd time.Time) ([]*model.User, error) {
 	var cached []*model.User
 	if err := useCache(pageID, &cached); err == nil {
 		slog.Info("use cache", slog.String("pageID", pageID))
@@ -44,14 +46,17 @@ func GetCommenters(ctx context.Context, cli *client.Client, pageID string, expec
 	set := make(map[string]struct{})
 	var users []*model.User
 
-	comments, err := c.Comment.Get(ctx, notionapi.BlockID(pageID), &notionapi.Pagination{
-		PageSize: 100,
-	})
+	comments, err := getComments(ctx, c, pageID)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, comment := range comments.Results {
+	for _, comment := range comments {
+		if comment.CreatedTime.After(commentEnd) {
+			// 지각 댓글은 제외
+			continue
+		}
+
 		if _, ok := set[comment.CreatedBy.ID.String()]; ok {
 			continue
 		}
@@ -62,51 +67,42 @@ func GetCommenters(ctx context.Context, cli *client.Client, pageID string, expec
 		})
 	}
 
-	if len(users) >= expectedCount {
-		slog.Info("save cache", slog.String("pageID", pageID))
-		saveCache(pageID, users)
-		return users, nil
-	}
+	slog.Info("save cache", slog.String("pageID", pageID))
+	saveCache(pageID, users)
+	return users, nil
+}
 
-	blocks, err := c.Block.GetChildren(ctx, notionapi.BlockID(pageID), &notionapi.Pagination{
+func getComments(ctx context.Context, c *notionapi.Client, pageID string) ([]notionapi.Comment, error) {
+	slog.Info("get comments on the page...", slog.String("pageID", pageID))
+	commentQueryRes, err := c.Comment.Get(ctx, notionapi.BlockID(pageID), &notionapi.Pagination{
 		PageSize: 100,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	for _, block := range blocks.Results {
-		comments, err := c.Comment.Get(ctx, block.GetID(), &notionapi.Pagination{
+	slog.Info("get comments on the children blocks...", slog.String("pageID", pageID))
+	childBlockRes, err := c.Block.GetChildren(ctx, notionapi.BlockID(pageID), &notionapi.Pagination{
+		PageSize: 100,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var res []notionapi.Comment
+	for _, block := range childBlockRes.Results {
+		childBlockCommentQueryRes, err := c.Comment.Get(ctx, block.GetID(), &notionapi.Pagination{
 			PageSize: 100,
 		})
 		if err != nil {
-			slog.Warn("failed to get comments for block", 
-				slog.String("blockID", block.GetID().String()), 
-				slog.Any("error", err))
-			continue
+			return nil, err
 		}
 
-		for _, comment := range comments.Results {
-			if _, ok := set[comment.CreatedBy.ID.String()]; ok {
-				continue
-			}
-			set[comment.CreatedBy.ID.String()] = struct{}{}
-			users = append(users, &model.User{
-				ID:   comment.CreatedBy.ID.String(),
-				Name: comment.CreatedBy.Name,
-			})
-
-			if len(users) >= expectedCount {
-				slog.Info("save cache", slog.String("pageID", pageID))
-				saveCache(pageID, users)
-				return users, nil
-			}
-		}
+		res = append(res, childBlockCommentQueryRes.Results...)
 	}
 
-	slog.Info("save cache", slog.String("pageID", pageID))
-	saveCache(pageID, users)
-	return users, nil
+	res = append(res, commentQueryRes.Results...)
+	return res, nil
 }
 
 func useCache(pageID string, v any) error {
