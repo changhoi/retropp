@@ -43,11 +43,13 @@ func init() {
 
 func main() {
 	const (
-		year    = 2024
-		quarter = 4
+		year    = 2025
+		quarter = 1
 	)
 
-	var omitWeeks = []int{}
+	var omitWeeks = []int{
+		1,
+	}
 
 	slog.Info("start retropp violation checker")
 	ctx := context.Background()
